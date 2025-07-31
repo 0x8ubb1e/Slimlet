@@ -1,19 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-体重记录器 – 终极版
-1  主窗体 & 向导同时存在且居中
-2  向导控件左对齐、默认值、单位/性别/中文
-3  数据库存 kg，前端可随意切换单位
-4  图表中文正常显示、可拖动、y=0 起点
-5  人物表格编辑、退出确认
-6  单位换算、长高反算身高、双曲线
-"""
 import os
 import json
 import math
 import sqlite3
 import datetime
+from PIL import Image, ImageTk
 
 import tkinter as tk
 from tkinter import ttk, messagebox, PhotoImage
@@ -111,7 +101,6 @@ class App(tk.Tk):
 	def __init__(self):
 		super().__init__()
 		self.title("体重记录器")
-		# self.geometry("540")
 		self.minsize(540, 1)
 
 		self.cfg = load_cfg()
@@ -130,21 +119,13 @@ class App(tk.Tk):
 
 	# ---------------- UI ----------------
 	def build_ui_collapsed(self):
-		# 主窗口改用 grid
-		# self.grid_rowconfigure(1, weight=1)   # 图表可纵向扩展
-		# self.grid_columnconfigure(0, weight=1)
-		# self.config(relief='solid', borderwidth=1)  # 添加边框
-
 		# 顶部人物栏
 		self.bar = ttk.Frame(self)
-		# bar.pack(fill='x', padx=10, pady=5)
 		self.bar.grid(row=0, column=0, sticky='ew', padx=20, pady=(10, 5))
 		self.bar.grid_columnconfigure(2, weight=1)
 
-		# ttk.Label(bar, text='人物').pack(side='left')
 		ttk.Label(self.bar, text='人物').grid(row=0, column=0)
 		self.cb_person = ttk.Combobox(self.bar, state='readonly', width=10)
-		# self.cb_person.pack(side='left', padx=5)
 		self.cb_person.grid(row=0, column=1, padx=(10, 0))
 		self.cb_person.bind('<<ComboboxSelected>>', self.switch_person)
 
@@ -153,14 +134,9 @@ class App(tk.Tk):
 
 		# 折叠/展开按钮
 		self.btn_toggle = ttk.Button(self.bar, text='添加数据', command=self.toggle_input)
-		# self.btn_toggle.pack(side='right', padx=10)
 		self.btn_toggle.grid(row=0, column=4)
-		# ttk.Button(bar, text='编辑人物', command=self.edit_person_win).pack(side='right', padx=10)
 		ttk.Button(self.bar, text='编辑人物', command=self.edit_person_win).grid(row=0, column=5, padx=5)
-		# refresh_img = PhotoImage(file=os.path.join(script_dir, 'icons', '260.png'))
-		# self.btn_refresh = ttk.Button(self.bar, image=refresh_img, text='刷新', width=6, command=self.refresh)
-		# self.btn_refresh.image = refresh_img  # 防止被垃圾回收
-		from PIL import Image, ImageTk
+
 		ico = Image.open('icons/refresh.png')
 		self.ico_img = ImageTk.PhotoImage(ico.resize((17, 17)))
 		self.btn_refresh = ttk.Button(self.bar, image=self.ico_img, command=self.refresh)
@@ -169,7 +145,8 @@ class App(tk.Tk):
 
 		# 输入框容器（初始隐藏）
 		self.input_frm = ttk.Frame(self)
-# 时间
+		
+		# 时间
 		ttk.Label(self.input_frm, text='时间').grid(row=1, column=0)
 		self.var_time = tk.StringVar(value=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 		ttk.Entry(self.input_frm, textvariable=self.var_time, width=18).grid(row=1, column=1, padx=(5, 10))
@@ -188,8 +165,6 @@ class App(tk.Tk):
 
 		ttk.Button(self.input_frm, text='确认添加', command=self.add_record).grid(row=1, column=6, padx=(5, 0))
 
-		# self.input_frm.pack()
-		# self.input_frm.pack_forget()
 		self.input_frm.lower()  # 先放到最底层
 		self.input_frm.grid(row=1, column=0, sticky='ew', padx=20, pady=5)
 		self.input_frm.grid_remove()
@@ -198,7 +173,6 @@ class App(tk.Tk):
 		self.fig = Figure(figsize=(5, 2.8), dpi=100)
 		self.ax = self.fig.add_subplot(111)
 		self.canvas = FigureCanvasTkAgg(self.fig, self)
-		# self.canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=5)
 		self.canvas.get_tk_widget().grid(row=2, column=0, sticky='nsew', padx=20, pady=(5, 20))
 
 		# 时间维度按钮区
@@ -305,12 +279,8 @@ class App(tk.Tk):
 		
 		# 时间过滤
 		now = datetime.datetime.now()
-		# delta_map = {'1月': 30, '3月': 90, '半年': 180, '1年': 365, '3年': 365*3, '5年': 365*5, '全部': 0}
-		# days = delta_map[self.current_scope]
-		# cutoff = now - datetime.timedelta(days=days)
 		delta_map = {'1月': 1, '3月': 3, '半年': 6, '1年': 12, '3年': 12*3, '5年': 12*5, '全部': 0}
 		months = delta_map[self.current_scope]
-		# cutoff = now - datetime.timedelta(months=months)
 		cutoff = subtract_months(now, months=months)
 		if months != 0:
 			rows = [r for r in rows if datetime.datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S') >= cutoff]
@@ -333,14 +303,6 @@ class App(tk.Tk):
 		self.ax.set_yticks(range(y_low, y_high + 1, 10))
 
 		# --------- X 轴仅三个刻度 ---------
-		# start, end = times[0], times[-1]
-		# self.ax.set_xlim(start, end)
-		# print(f"start:{start}, end: {end}, days: {(end - start).days}")
-		# if (end - start).days> 30:
-		# 	mid = start + (end - start) / 2
-		# 	self.ax.set_xticks([start, mid, end])
-		# else:
-		# 	self.ax.set_xticks([start, end])
 		if months != 0:  # 不为全部
 			start = cutoff
 		else:  # 为全部
@@ -375,14 +337,11 @@ class App(tk.Tk):
 	def toggle_input(self):
 		self.show_input = not self.show_input
 		if self.show_input:
-		# if not self.input_frm.winfo_ismapped():
-			# self.input_frm.pack(fill='x', padx=10, pady=5)
 			self.input_frm.grid()
 			self.btn_toggle.config(text='收起输入')
 			# 刷新时间为“年-月-日 时:分:秒”
 			self.var_time.set(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 		else:
-			# self.input_frm.pack_forget()
 			self.input_frm.grid_remove()
 			self.btn_toggle.config(text='添加数据')
 
@@ -484,7 +443,6 @@ class App(tk.Tk):
 
 			# 去重
 			self.cfg = load_cfg()
-			# self.cfg['persons'] = [p for p in self.cfg['persons'] if p['name'] != name]
 			if edit is None:  # 新增用户
 				self.cfg['persons'].append(person)
 			else:  # 编辑用户
@@ -564,7 +522,6 @@ class App(tk.Tk):
 		if self.person:
 			self.lbl_unit.config(text=self.person['unit'])
 			self.update_scope_buttons()
-			# self.draw_chart()
 
 	def refresh(self):
 		"""重新读取配置+数据库并重绘界面"""
