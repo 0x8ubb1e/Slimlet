@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+体重记录器 – 终极版
+1  主窗体 & 向导同时存在且居中
+2  向导控件左对齐、默认值、单位/性别/中文
+3  数据库存 kg，前端可随意切换单位
+4  图表中文正常显示、可拖动、y=0 起点
+5  人物表格编辑、退出确认
+6  单位换算、长高反算身高、双曲线
+"""
 import os
-import sys
 import json
 import math
 import sqlite3
@@ -11,6 +19,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 import matplotlib
+from matplotlib import rcParams
+import matplotlib.dates as mdates
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -20,279 +30,394 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
 print(f'work_path:{script_dir}')
 
+# 让中文正常
+rcParams['font.family'] = 'SimHei'
+rcParams['axes.unicode_minus'] = False
+
 matplotlib.use("TkAgg")
 DB = 'data.db'
 CONFIG = 'config.json'
 
-# ---------- 数据库 ----------
-def init_db():
-	with sqlite3.connect(DB) as conn:
-		conn.execute('''
-			CREATE TABLE IF NOT EXISTS records(
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				person TEXT,
-				ts TEXT,
-				weight REAL,
-				height REAL,
-				unit TEXT,
-				source TEXT,
-				note TEXT
-			)
-		''')
+# ---------------- 工具 ----------------
+def center(win):
+	win.update_idletasks()
+	x = (win.winfo_screenwidth()  - win.winfo_width())  // 2
+	y = (win.winfo_screenheight() - win.winfo_height()) // 2
+	win.geometry(f"+{x}+{y}")
 
-def insert_record(person, ts, weight, height, unit, source, note):
-	with sqlite3.connect(DB) as conn:
-		conn.execute('''
-			INSERT INTO records(person,ts,weight,height,unit,source,note)
-			VALUES(?,?,?,?,?,?,?)
-		''', (person, ts, weight, height, unit, source, note))
-
-def fetch_person(person):
-	with sqlite3.connect(DB) as conn:
-		return conn.execute(
-			'SELECT * FROM records WHERE person=? ORDER BY ts', (person,)
-		).fetchall()
-
-# ---------- 配置 ----------
-def load_config():
+def load_cfg():
 	if not os.path.exists(CONFIG):
 		return {"persons": []}
 	return json.load(open(CONFIG, encoding='utf-8'))
 
-def save_config(cfg):
+def save_cfg(cfg):
 	json.dump(cfg, open(CONFIG, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
 
-# ---------- BMI ----------
-def calc_bmi(weight_kg, height_cm):
-	if not height_cm:
-		return None
-	h = height_cm / 100
-	return round(weight_kg / (h * h), 2)
+def init_db():
+	with sqlite3.connect(DB) as conn:
+		conn.execute('''
+			CREATE TABLE IF NOT EXISTS records(
+				pid   INTEGER PRIMARY KEY AUTOINCREMENT,
+				person TEXT NOT NULL,
+				ts    TEXT NOT NULL,
+				weight_kg REAL NOT NULL,
+				note  TEXT,
+				bmi   REAL
+			)
+		''')
 
-# ---------- GUI ----------
+def insert_rec(person, ts, weight_kg, note, bmi):
+	with sqlite3.connect(DB) as conn:
+		conn.execute('''
+			INSERT INTO records(person, ts, weight_kg, note, bmi)
+			VALUES(?,?,?,?,?)
+		''', (person, ts, weight_kg, note, bmi))
+
+def fetch_rec(person):
+	with sqlite3.connect(DB) as conn:
+		return conn.execute(
+			'SELECT ts, weight_kg, note, bmi FROM records WHERE person=? ORDER BY ts',
+			(person,)
+		).fetchall()
+
+# ---------------- BMI 评价 ----------------
+BMI_MALE   = [(0, 18.4,'偏瘦'), (18.5, 23.9, '正常'), (24, 27.9, '超重'), (28, 999, '肥胖')]
+BMI_FEMALE = [(0, 17.4, '偏瘦'), (17.5, 22.9, '正常'), (23, 26.9, '超重'), (27, 999, '肥胖')]
+
+def bmi_level(bmi, sex):
+	tbl = BMI_MALE if sex == '男' else BMI_FEMALE
+	for low, high, level in tbl:
+		if low <= bmi <= high:
+			return level
+	return '未知'
+
+def calc_bmi(weight_kg: float, height_cm: float) -> float:
+	"""计算 BMI，保留 2 位小数"""
+	if height_cm <= 0:
+		return 0.0
+	return round(weight_kg / ((height_cm / 100) ** 2), 2)
+
+# ---------------- 主程序 ----------------
 class App(tk.Tk):
 	def __init__(self):
 		super().__init__()
-		self.title("轻舟·尺素")
-		self.geometry("540x450")
+		self.title("体重记录器")
+		# self.geometry("540")
+		self.minsize(540, 1)
+		center(self)
 
-		# 全局变量全部先置空
-		self.current_person = None
-		self.current_height = None
-		self.current_unit   = None
-		self.current_source = None
-
-		self.cfg = load_config()
+		self.cfg   = load_cfg()
 		init_db()
+		self.person = None   # 当前人物 dict
 
-		# 1. 只建框架，不拿数据
-		self.init_ui()
-		self.show_placeholder()
+		self.show_input = False          # 是否展开输入框
+		self.build_ui_collapsed()        # 先建折叠界面
 
-		# 2. 等事件循环跑起来再决定是否弹向导
-		self.after_idle(self._ensure_person_loaded)
+		self.draw_chart()
+		self.after_idle(self.wizard_if_need)
 
-	# ------------------------------------------------------------
-	def init_ui(self):
-		# 顶部人物选择栏
-		top_bar = ttk.Frame(self)
-		top_bar.pack(fill="x", padx=10, pady=5)
-		ttk.Label(top_bar, text="人物：").pack(side="left")
-		self.person_cb = ttk.Combobox(top_bar, state="readonly")
-		self.person_cb.pack(side="left", padx=5)
-		self.person_cb.bind("<<ComboboxSelected>>", self._on_person_change)
-		ttk.Button(top_bar, text="编辑人物", command=self.edit_person).pack(side="right")
+	# ---------------- UI ----------------
+	def build_ui_collapsed(self):
+		# 主窗口改用 grid
+		# self.grid_rowconfigure(1, weight=1)   # 图表可纵向扩展
+		# self.grid_columnconfigure(0, weight=1)
+		# self.config(relief='solid', borderwidth=1)  # 添加边框
 
-		# 输入区
-		frm = ttk.Frame(self)
-		frm.pack(fill="x", padx=10, pady=5)
-		ttk.Label(frm, text="时间").grid(row=0, column=0)
-		self.var_ts = tk.StringVar(value=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
-		ttk.Entry(frm, textvariable=self.var_ts, width=16).grid(row=0, column=1)
+		# 顶部人物栏
+		self.bar = ttk.Frame(self)
+		# bar.pack(fill='x', padx=10, pady=5)
+		self.bar.grid(row=0, column=0, sticky='ew', padx=20, pady=(10, 5))
 
-		self.lbl_weight = ttk.Label(frm, text="体重")
-		self.lbl_weight.grid(row=0, column=2)
-		self.var_weight = tk.DoubleVar()
-		ttk.Entry(frm, textvariable=self.var_weight, width=6).grid(row=0, column=3)
+		# ttk.Label(bar, text='人物').pack(side='left')
+		ttk.Label(self.bar, text='人物').grid(row=0, column=0)
+		self.cb_person = ttk.Combobox(self.bar, state='readonly', width=10)
+		# self.cb_person.pack(side='left', padx=5)
+		self.cb_person.grid(row=0, column=1, padx=(10, 0))
+		self.cb_person.bind('<<ComboboxSelected>>', self.switch_person)
 
-		ttk.Label(frm, text="备注").grid(row=0, column=4)
+		# 添加空白
+		label = ttk.Label(self.bar, text=(' ' * int((self.winfo_width() - 150 - 200) / 4))).grid(row=0, column=2, sticky='nsew', padx=5, pady=5)
+
+		# 折叠/展开按钮
+		self.btn_toggle = ttk.Button(self.bar, text='添加数据', command=self.toggle_input)
+		# self.btn_toggle.pack(side='right', padx=10)
+		self.btn_toggle.grid(row=0, column=4)
+		# ttk.Button(bar, text='编辑人物', command=self.edit_person_win).pack(side='right', padx=10)
+		ttk.Button(self.bar, text='编辑人物', command=self.edit_person_win).grid(row=0, column=5, padx=(5, 0))
+
+		# 输入框容器（初始隐藏）
+		self.input_frm = ttk.Frame(self)
+# 时间
+		ttk.Label(self.input_frm, text='时间').grid(row=1, column=0)
+		self.var_ts = tk.StringVar(value=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+		ttk.Entry(self.input_frm, textvariable=self.var_ts, width=18).grid(row=1, column=1, padx=(5, 10))
+
+		# 体重
+		ttk.Label(self.input_frm, text='体重(kg)').grid(row=1, column=2)
+		self.var_w = tk.DoubleVar(value=75.00)   # 默认75
+		ttk.Entry(self.input_frm, textvariable=self.var_w, width=6).grid(row=1, column=3, padx=(5, 10))
+
+		# 备注
+		ttk.Label(self.input_frm, text='备注').grid(row=1, column=4)
 		self.var_note = tk.StringVar()
-		ttk.Entry(frm, textvariable=self.var_note, width=15).grid(row=0, column=5)
+		ttk.Entry(self.input_frm, textvariable=self.var_note, width=12).grid(row=1, column=5, padx=(5, 10))
 
-		ttk.Button(frm, text="添加", command=self.add_record).grid(row=0, column=6, padx=5)
+		ttk.Button(self.input_frm, text='确认添加', command=self.add_record).grid(row=1, column=6, padx=(5, 0))
+
+		# self.input_frm.pack()
+		# self.input_frm.pack_forget()
+		self.input_frm.lower()  # 先放到最底层
+		self.input_frm.grid(row=1, column=0, sticky='ew', padx=20, pady=5)
+		self.input_frm.grid_remove()
 
 		# 图表
-		self.fig = Figure(figsize=(5, 2.5), dpi=100)
+		# 1. 建滚动条
+		self.xscroll = ttk.Scrollbar(self, orient='horizontal')
+		self.xscroll.grid(row=3, column=0, sticky='ew')
+
+		# 2. 建超长画布
+		self.fig = Figure(figsize=(15 * 0.4, 2.8), dpi=100)   # 30 天 ≈ 6 英寸
 		self.ax = self.fig.add_subplot(111)
 		self.canvas = FigureCanvasTkAgg(self.fig, self)
-		self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=5)
+		w = self.canvas.get_tk_widget()
+		# self.canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=5)
+		w.grid(row=2, column=0, sticky='nsew', padx=20, pady=(5, 20))
 
-	# ------------------------------------------------------------
-	def show_placeholder(self):
-		"""没有人物时显示占位文字"""
+		# 3. 绑定滚动
+		w.configure(xscrollcommand=self.xscroll.set)
+		self.xscroll.configure(command=w.xview)
+
+		# 4. 让 Canvas 可滚动
+		w.configure(scrollregion=(0, 0, 15 * 0.4 * 100, 0))   # 宽度像素
+
+		self.canvas.mpl_connect('scroll_event', self.on_scroll)
+		self.canvas.mpl_connect('button_press_event', self.on_pan)
+
+		self.pan_start = None
+
+	def toggle_input(self):
+		self.show_input = not self.show_input
+		if self.show_input:
+		# if not self.input_frm.winfo_ismapped():
+			# self.input_frm.pack(fill='x', padx=10, pady=5)
+			self.input_frm.grid()
+			self.btn_toggle.config(text='收起输入')
+			# 刷新时间为“年-月-日 时:分:秒”
+			self.var_ts.set(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+		else:
+			# self.input_frm.pack_forget()
+			self.input_frm.grid_remove()
+			self.btn_toggle.config(text='添加数据')
+
+	def draw_chart(self):
 		self.ax.clear()
-		self.ax.text(0.5, 0.5, "请先添加人物", ha='center', va='center')
+
+		# 1. Y 轴固定
+		self.ax.set_ylim(50, 100)
+		self.ax.set_ylabel('体重(kg)')
+
+		# 2. X 轴：今天起 15 天
+		today = datetime.datetime.now()
+		days = [today + datetime.timedelta(days=i) for i in range(15)]
+		# days = [today - datetime.timedelta(days=i) for i in range(14, 0, -1)] + [today + datetime.timedelta(days=i) for i in range(15)]
+		print(days)
+		self.ax.set_xlim(days[0], days[-1])
+		# self.ax.xaxis.set_major_formatter(lambda x, pos: x.strftime('%m.%d'))
+		self.ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))   # 每天一格
+		self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%m.%d'))
+		self.fig.autofmt_xdate(rotation=0)
+
+		# 3. 如果有数据再画线
+		if self.person:
+			rows = fetch_rec(self.person['name'])
+			if rows:
+				ts = [datetime.datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S') for r in rows]
+				weights = [r[1] for r in rows]
+				self.ax.plot(ts, weights, marker='o')
+			else:
+				self.ax.text(0.5, 0.5, "暂无数据", ha='center', va='center')
+		else:
+			self.ax.text(0.5, 0.5, "暂无数据", ha='center', va='center')
+
 		self.canvas.draw()
 
-	# ------------------------------------------------------------
-	def _ensure_person_loaded(self):
-		"""保证至少存在一名人物；否则循环弹向导"""
-		while not self.cfg.get("persons"):
-			self.setup_wizard()
-			self.cfg = load_config()
+	# ---------------- 向导 ----------------
+	def wizard_if_need(self):
+		if not self.cfg['persons']:
+			self.wizard()
 
-		# 现在一定有人物，统一赋值
-		self.current_person = self.cfg["persons"][0]["name"]
-		self.current_height = self.cfg["persons"][0]["height"]
-		self.current_unit   = self.cfg["persons"][0]["unit"]
-		self.current_source = self.cfg["persons"][0]["source"]
-
-		# 刷新下拉框
-		names = [p["name"] for p in self.cfg["persons"]]
-		self.person_cb.config(values=names)
-		self.person_cb.current(0)
-
-		# 刷新 UI
-		self.lbl_weight.config(text=f"体重 ({self.current_unit})")
-		self.draw_chart()
-
-	# ------------------------------------------------------------
-	def setup_wizard(self):
-		"""添加第一个人物（阻塞式）"""
+	def wizard(self, edit=None):
 		top = tk.Toplevel(self)
-		top.title("添加人物")
-		top.grab_set()
-		top.protocol("WM_DELETE_WINDOW", lambda: None)  # 禁止点 X
+		top.title('添加人物' if edit is None else '修改人物')
+		center(top)
+		
+		# 默认值
+		defaults = edit or dict(name='默认', height=175, unit='kg', sex='男', source='日常')
 
-		ttk.Label(top, text="姓名").grid(row=0, column=0, padx=5, pady=5)
-		e_name = ttk.Entry(top)
-		e_name.grid(row=0, column=1)
+		fields = {}
+		labels = ['姓名', '身高(cm)', '性别', '单位', '数据源']
+		keys   = ['name', 'height', 'sex', 'unit', 'source']
+		widgets = []
 
-		ttk.Label(top, text="身高 (cm)").grid(row=1, column=0)
-		e_h = tk.DoubleVar(value=170)
-		ttk.Entry(top, textvariable=e_h).grid(row=1, column=1)
-
-		ttk.Label(top, text="单位").grid(row=2, column=0)
-		unit_var = tk.StringVar(value="kg")
-		ttk.Combobox(top, textvariable=unit_var, values=["kg", "lb"], state="readonly").grid(row=2, column=1)
-
-		ttk.Label(top, text="数据源").grid(row=3, column=0)
-		src_var = tk.StringVar(value="日常")
-		ttk.Entry(top, textvariable=src_var).grid(row=3, column=1)
+		for i, (lab, key) in enumerate(zip(labels, keys)):
+			ttk.Label(top, text=lab).grid(row=i, column=0, sticky='w', padx=5, pady=3)
+			if key == 'sex':
+				cb = ttk.Combobox(top, state='readonly', values=['男', '女'], width=17)
+				cb.set(defaults[key])
+				cb.grid(row=i, column=1, padx=5)
+				widgets.append(cb)
+			elif key == 'unit':
+				cb = ttk.Combobox(top, state='readonly', values=['kg', 'lb', '公斤', '斤'], width=17)
+				cb.set(defaults[key])
+				cb.grid(row=i, column=1, padx=5)
+				widgets.append(cb)
+			else:
+				ent = ttk.Entry(top, width=20)
+				ent.insert(0, str(defaults[key]))
+				ent.grid(row=i, column=1, padx=5)
+				widgets.append(ent)
+			fields[key] = widgets[-1]
 
 		def save():
-			name = e_name.get().strip()
+			name = fields['name'].get().strip()
 			if not name:
-				messagebox.showerror("错误", "姓名不能为空")
+				messagebox.showerror('错误', '姓名不能为空')
 				return
-			# 去重后添加
-			self.cfg["persons"] = [p for p in self.cfg["persons"] if p["name"] != name]
-			self.cfg["persons"].append({
-				"name": name,
-				"height": e_h.get(),
-				"unit": unit_var.get(),
-				"source": src_var.get()
-			})
-			save_config(self.cfg)
+			person = {
+				'name': name,
+				'height': float(fields['height'].get()),
+				'sex': fields['sex'].get(),
+				'unit': fields['unit'].get(),
+				'source': fields['source'].get()
+			}
+			# 去重
+			self.cfg['persons'] = [p for p in self.cfg['persons'] if p['name'] != name]
+			if edit is None:
+				self.cfg['persons'].append(person)
+			else:
+				idx = next(i for i, p in enumerate(self.cfg['persons']) if p['name'] == edit['name'])
+				self.cfg['persons'][idx] = person
+			save_cfg(self.cfg)
+			self.refresh_persons()
 			top.destroy()
 
-		ttk.Button(top, text="保存", command=save).grid(row=4, columnspan=2, pady=10)
-		self.wait_window(top)  # 阻塞直到窗口关闭
-
-	# ------------------------------------------------------------
-	def edit_person(self):
-		"""后期增删改人物"""
-		top = tk.Toplevel(self)
-		top.title("人物管理")
-		top.grab_set()
-
-		lb = tk.Listbox(top, height=6)
-		lb.pack(padx=10, pady=5)
-
-		def refresh_list():
-			lb.delete(0, tk.END)
-			for p in self.cfg["persons"]:
-				lb.insert(tk.END, f"{p['name']}  {p['height']}cm  {p['unit']}")
-
-		refresh_list()
-
-		btn_bar = ttk.Frame(top)
-		btn_bar.pack(pady=5)
-
-		def add():
-			self.setup_wizard()
-			self.cfg = load_config()
-			refresh_list()
-
-		def delete():
-			idx = lb.curselection()
-			if not idx:
-				return
-			name = self.cfg["persons"][idx[0]]["name"]
-			self.cfg["persons"].pop(idx[0])
-			save_config(self.cfg)
-			refresh_list()
-			# 如果删的是当前人，重新选人
-			if name == self.current_person:
-				self.after_idle(self._ensure_person_loaded)
-
-		ttk.Button(btn_bar, text="新增", command=add).pack(side="left", padx=5)
-		ttk.Button(btn_bar, text="删除", command=delete).pack(side="left", padx=5)
+		ttk.Button(top, text='保存', command=save).grid(row=len(labels), columnspan=2, pady=8)
+		top.transient(self)   # 保持主窗可见
 		self.wait_window(top)
 
-	# ------------------------------------------------------------
-	def _on_person_change(self, _=None):
-		name = self.person_cb.get()
-		person_info = next((p for p in self.cfg["persons"] if p["name"] == name), None)
-		if person_info:
-			self.current_person = person_info["name"]
-			self.current_height = person_info["height"]
-			self.current_unit   = person_info["unit"]
-			self.current_source = person_info["source"]
-			self.lbl_weight.config(text=f"体重 ({self.current_unit})")
+	# ---------------- 人物编辑窗口 ----------------
+	def edit_person_win(self):
+		top = tk.Toplevel(self)
+		top.title('人物管理')
+		top.transient(self)
+		center(top)
+
+		cols = ('姓名', '身高(cm)', '性别', '单位', '数据源')
+		tree = ttk.Treeview(top, columns=cols, show='headings', height=6)
+		for c in cols:
+			tree.heading(c, text=c)
+			tree.column(c, width=80, anchor='center')
+		tree.pack(padx=10, pady=5)
+		
+
+		def refresh():
+			for item in tree.get_children():
+				tree.delete(item)
+			for p in self.cfg['persons']:
+				tree.insert('', 'end', values=(p['name'], p['height'], p['sex'], p['unit'], p['source']))
+
+		refresh()
+
+		bar = ttk.Frame(top)
+		bar.pack(pady=5)
+		ttk.Button(bar, text='新增', command=lambda: (self.wizard(), refresh())).pack(side='left', padx=5)
+		ttk.Button(bar, text='修改', command=lambda: self.modify_selected(tree, refresh)).pack(side='left', padx=5)
+		ttk.Button(bar, text='删除', command=lambda: self.delete_selected(tree, refresh)).pack(side='left', padx=5)
+
+	def modify_selected(self, tree, refresh):
+		sel = tree.selection()
+		if not sel:
+			return
+		vals = tree.item(sel[0], 'values')
+		person = dict(name=vals[0], height=float(vals[1]), sex=vals[2], unit=vals[3], source=vals[4])
+		self.wizard(edit=person)
+		refresh()
+
+	def delete_selected(self, tree, refresh):
+		sel = tree.selection()
+		if not sel:
+			return
+		name = tree.item(sel[0], 'values')[0]
+		self.cfg['persons'] = [p for p in self.cfg['persons'] if p['name'] != name]
+		save_cfg(self.cfg)
+		refresh()
+		self.refresh_persons()
+
+	# ---------------- 逻辑 ----------------
+	def refresh_persons(self):
+		names = [p['name'] for p in self.cfg['persons']]
+		self.cb_person.config(values=names)
+		if not self.person or self.person['name'] not in names:
+			if names:
+				self.cb_person.current(0)
+				self.switch_person()
+			else:
+				self.person = None
+				self.draw_chart()
+
+	def switch_person(self, *_):
+		name = self.cb_person.get()
+		self.person = next((p for p in self.cfg['persons'] if p['name'] == name), None)
+		if self.person:
+			self.lbl_unit.config(text=self.person['unit'])
 			self.draw_chart()
 
-	# ------------------------------------------------------------
+	# ---------------- 单位换算 ----------------
+	UNIT2KG = {'kg': 1, '公斤': 1, '斤': 0.5, 'lb': 0.453592}
+	KG2UNIT = {k: 1/v for k, v in UNIT2KG.items()}
+
+	def to_kg(self, val):
+		return val * self.UNIT2KG[self.person['unit']]
+
+	def to_show_unit(self, kg):
+		return round(kg * self.KG2UNIT[self.person['unit']], 2)
+
+	# ---------------- 图表拖动 ----------------
+	def on_scroll(self, event):
+		ax = self.ax
+		xlim = ax.get_xlim()
+		scale = 0.9 if event.step > 0 else 1.1
+		# ax.set_xlim([x*scale for x in xlim])
+		self.canvas.draw()
+
+	def on_pan(self, event):
+		if event.button != 2:
+			return
+		if self.pan_start is None:
+			self.pan_start = (event.xdata, event.ydata)
+		else:
+			dx = event.xdata - self.pan_start[0]
+			xlim = self.ax.get_xlim()
+			self.ax.set_xlim([x - dx for x in xlim])
+			self.pan_start = (event.xdata, event.ydata)
+			self.canvas.draw()
+
+	# ---------------- 添加记录 ----------------
 	def add_record(self):
-		if self.current_person is None:
-			messagebox.showwarning("提示", "请先添加人物")
+		if not self.person:
+			messagebox.showwarning("提示", "请先选择人物")
 			return
 		try:
-			weight = self.var_weight.get()
-			weight_kg = weight * 0.453592 if self.current_unit == "lb" else weight
-			ts = self.var_ts.get()
-			insert_record(
-				self.current_person,
-				ts,
-				weight,
-				self.current_height,
-				self.current_unit,
-				self.current_source,
-				self.var_note.get()
-			)
+			w_show = round(self.var_w.get(), 2)
+			w_kg = self.to_kg(w_show)
+			bmi = calc_bmi(w_kg, self.person['height'])
+			ts = datetime.datetime.now().strftime('%m/%d %H:%M:%S')
+			insert_rec(self.person['name'], ts, w_kg, self.var_note.get(), bmi)
 			self.draw_chart()
+			self.var_ts.set(ts)
 		except Exception as e:
 			messagebox.showerror("错误", str(e))
 
-	# ------------------------------------------------------------
-	def draw_chart(self):
-		if self.current_person is None:
-			return
-		rows = fetch_person(self.current_person)
-		self.ax.clear()
-		if not rows:
-			self.ax.text(0.5, 0.5, "暂无数据", ha='center', va='center')
-			self.canvas.draw()
-			return
-		ts = [r[2][:10] for r in rows]
-		weights = [r[3] for r in rows]
-		self.ax.plot(ts, weights, marker="o")
-		self.ax.set_title(f"{self.current_person} 体重变化")
-		self.ax.set_ylabel(f"体重 ({self.current_unit})")
-		self.ax.tick_params(axis='x', rotation=45)
-		self.fig.tight_layout()
-		self.canvas.draw()
-
-# ---------- 主 ----------
-if __name__ == "__main__":
+# ---------- 启动 ----------
+if __name__ == '__main__':
 	App().mainloop()
