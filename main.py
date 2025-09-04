@@ -24,26 +24,32 @@ rcParams['font.family'] = 'SimHei'
 rcParams['axes.unicode_minus'] = False
 
 matplotlib.use("TkAgg")
-DB = 'data.db'
+DB = 'slim.db'
 CONFIG = 'config.json'
 
 # ---------------- 工具 ----------------
 def center(win):
 	win.update_idletasks()
-	x = (win.winfo_screenwidth()  - win.winfo_width())  // 2
+	x = (win.winfo_screenwidth() - win.winfo_width()) // 2
 	y = (win.winfo_screenheight() - win.winfo_height()) // 2
 	win.geometry(f"+{x}+{y}")
 
+# 划时间区间 当前时间 - 时间维度
 def subtract_months(date, months):
+	if months == 0:
+		return
+	
 	month = date.month - months
-	print(f"date: {date} months: {months} month: {month}")
+	print(f"date: {date.date()} months: {months} month: {month}")
 	year = date.year
 	while month <= 0:
 		month += 12
 		year -= 1
-	print(f"start: {date.replace(year=year, month=month, day=1)}")
-	return date.replace(year=year, month=month, day=1)
+	# print(f"start: {date.replace(year=year, month=month, day=1).date()} end: {date.date()}")
+	# print(f"{date.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)}")
+	return date.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
 
+# ---------------- 数据层 ----------------
 def load_cfg():
 	if not os.path.exists(CONFIG):
 		return {"persons": []}
@@ -56,23 +62,23 @@ def init_db():
 	with sqlite3.connect(DB) as conn:
 		conn.execute('''
 			CREATE TABLE IF NOT EXISTS records (
-				id   INTEGER PRIMARY KEY AUTOINCREMENT,
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				person TEXT NOT NULL,
-				time    TEXT NOT NULL,
-				weight REAL NOT NULL,
-				note  TEXT,
-				bmi   REAL
+				time TEXT NOT NULL,
+				weight float NOT NULL,
+				note TEXT,
+				bmi float
 			)
 		''')
 
-def insert_rec(person, time, weight, note, bmi):
+def insert_record(person, time, weight, note, bmi):
 	with sqlite3.connect(DB) as conn:
 		conn.execute('''
 			INSERT INTO records(person, time, weight, note, bmi)
 			VALUES(?,?,?,?,?)
 		''', (person, time, weight, note, bmi))
 
-def fetch_rec(person):
+def fetch_records(person):
 	with sqlite3.connect(DB) as conn:
 		return conn.execute(
 			'SELECT time, weight, note, bmi FROM records WHERE person=? ORDER BY time',
@@ -80,7 +86,7 @@ def fetch_rec(person):
 		).fetchall()
 
 # ---------------- BMI 评价 ----------------
-BMI_MALE   = [(0, 18.4,'偏瘦'), (18.5, 23.9, '正常'), (24, 27.9, '超重'), (28, 999, '肥胖')]
+BMI_MALE = [(0, 18.4, '偏瘦'), (18.5, 23.9, '正常'), (24, 27.9, '超重'), (28, 999, '肥胖')]
 BMI_FEMALE = [(0, 17.4, '偏瘦'), (17.5, 22.9, '正常'), (23, 26.9, '超重'), (27, 999, '肥胖')]
 
 def bmi_level(bmi, sex):
@@ -96,29 +102,161 @@ def calc_bmi(weight: float, height: float) -> float:
 		return 0.0
 	return round(weight / ((height / 100) ** 2), 2)
 
+# ---------------- 单位换算 ----------------
+UNIT2KG = {'kg': 1, '公斤': 1, '斤': 0.5, 'lb': 0.453592}
+KG2UNIT = {k: 1/v for k, v in UNIT2KG.items()}
+
+def to_kg(val, unit): # 用户输入 → kg
+	return val * UNIT2KG[unit]
+
+def to_show_unit(val, unit): # kg → 用户单位
+	return round(val * KG2UNIT[unit], 2)
+
 # ---------------- 主程序 ----------------
 class App(tk.Tk):
 	def __init__(self):
 		super().__init__()
 		self.title("体重记录器")
 		self.minsize(540, 1)
+		self._init_data()
 
+		# 先把所有数据读进内存
+		self.all_records = {} # {person_name: [(time, weight, note, bmi), ...]}
+		self.person = None # 当前人物 dict
+		self.unit = None # 当前显示单位
+		self.show_input = False
+		self.refresh_persons() # 读取所有记录
+
+		self.build_ui() # 渲染UI
+		self.after_idle(self.populate_ui) # 统一填充数据
+
+	def populate_ui(self):
+		# 填人物下拉框
+		names = list(self.all_records.keys())
+		self.cb_person['values'] = names
+		if names:
+			self.cb_person.current(0)
+			self.switch_person()
+
+	# ---------------- 逻辑 ----------------
+	# ---------- 统一初始化 ----------
+	"""返回 (cfg, records) 或触发向导后重新加载"""
+	def _init_data(self):
+		# 配置文件
 		self.cfg = load_cfg()
-		self.person = None
+		if not self.cfg['persons']:
+			self.wizard()
+			self.cfg = load_cfg()
+
+		# 2. 数据库
 		init_db()
+		self.records = {}
+		with sqlite3.connect(DB) as conn:
+			for name in [p['name'] for p in self.cfg['persons']]:
+				rows = conn.execute(
+					'SELECT time, weight, note, bmi FROM records WHERE person=? ORDER BY time',
+					(name,)
+				).fetchall()
+				self.records[name] = rows
 
-		# ① 先建界面
-		self.show_input = False          # 是否展开输入框
-		self.build_ui_collapsed()        # 先建折叠界面
+	"""重新读取配置+数据库并重绘界面"""
+	def refresh(self):
+		self.refresh_persons() # 刷新人物数据
+		self.populate_ui() # 刷新下拉框
+		self.update_scope_buttons() # 刷新时间维度按钮
+		self.draw_chart() # 重绘折线图
 
-		center(self)
+	"""读取所有数据"""
+	def refresh_persons(self):
+		self.cfg = load_cfg() # 读取配置
+		self.wizard_if_need() # 没有人物就跳出向导来创建
+		self.person = self.cfg['persons'][0]
 
-		self.draw_chart()
-		# ② 再向导  ③ 最后统一刷新人物
-		self.after_idle(self.wizard_if_need)
+		self.all_records.clear()
+		for name in [p['name'] for p in self.cfg['persons']]:
+			rows = fetch_records(name)
+			self.all_records[name] = rows
+		
+		if not self.all_records:
+			init_db()
+
+	def switch_person(self, *_):
+		name = self.cb_person.get()
+		self.person = next((p for p in self.cfg['persons'] if p['name'] == name), None)
+		if self.person:
+			self.lbl_unit.config(text=self.person['unit'])
+			self.update_scope_buttons()
+
+	# ---------------- 向导 ----------------
+	def wizard_if_need(self):
+		# 阻塞向导直到有人物
+		while not self.cfg['persons']:
+			self.wizard()
+			self.cfg = load_cfg()
+
+	def wizard(self, edit=None):
+		top = tk.Toplevel(self)
+		top.title('添加人物' if edit is None else '修改人物')
+		center(top)
+		
+		# 默认值
+		defaults = edit or dict(name='默认', height=175, unit='kg', sex='男', source='日常')
+
+		fields = {}
+		labels = ['姓名', '身高(cm)', '性别', '单位', '数据源']
+		keys = ['name', 'height', 'sex', 'unit', 'source']
+		widgets = []
+
+		for i, (lab, key) in enumerate(zip(labels, keys)):
+			ttk.Label(top, text=lab).grid(row=i, column=0, sticky='w', padx=5, pady=3)
+			if key == 'sex':
+				cb = ttk.Combobox(top, state='readonly', values=['男', '女'], width=17)
+				cb.set(defaults[key])
+				cb.grid(row=i, column=1, padx=5)
+				widgets.append(cb)
+			elif key == 'unit':
+				cb = ttk.Combobox(top, state='readonly', values=['kg', 'lb', '公斤', '斤'], width=17)
+				cb.set(defaults[key])
+				cb.grid(row=i, column=1, padx=5)
+				widgets.append(cb)
+			else:
+				ent = ttk.Entry(top, width=20)
+				ent.insert(0, str(defaults[key]))
+				ent.grid(row=i, column=1, padx=5)
+				widgets.append(ent)
+			fields[key] = widgets[-1]
+
+		def save():
+			name = fields['name'].get().strip()
+			if not name:
+				messagebox.showerror('错误', '姓名不能为空')
+				return
+			
+			person = {
+				'name': name,
+				'height': float(fields['height'].get()),
+				'sex': fields['sex'].get(),
+				'unit': fields['unit'].get(),
+				'source': fields['source'].get()
+			}
+
+			# 去重
+			self.cfg = load_cfg()
+			if edit is None: # 新增用户
+				self.cfg['persons'].append(person)
+			else: # 编辑用户
+				idx = next(i for i, p in enumerate(self.cfg['persons']) if p['name'] == edit['name'])
+				self.cfg['persons'][idx] = person
+			save_cfg(self.cfg)
+			self.cfg = load_cfg() # 立刻重新读文件
+			top.destroy()
+
+		ttk.Button(top, text='保存', command=save).grid(row=len(labels), columnspan=2, pady=8)
+		top.transient(self) # 保持主窗可见
+		self.wait_window(top)
 
 	# ---------------- UI ----------------
-	def build_ui_collapsed(self):
+	def build_ui(self):
 		# 顶部人物栏
 		self.bar = ttk.Frame(self)
 		self.bar.grid(row=0, column=0, sticky='ew', padx=20, pady=(10, 5))
@@ -148,24 +286,26 @@ class App(tk.Tk):
 		
 		# 时间
 		ttk.Label(self.input_frm, text='时间').grid(row=1, column=0)
-		self.var_time = tk.StringVar(value=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+		self.var_time = tk.StringVar(value=datetime.datetime.now().strftime('%Y.%m.%d %H:%M:%S'))
 		ttk.Entry(self.input_frm, textvariable=self.var_time, width=18).grid(row=1, column=1, padx=(5, 10))
 
 		# 体重
-		ttk.Label(self.input_frm, text='体重(kg)').grid(row=1, column=2)
-		self.var_w = tk.DoubleVar(value=75.00)   # 默认75
-		ttk.Entry(self.input_frm, textvariable=self.var_w, width=6).grid(row=1, column=3, padx=(5, 10))
-		self.lbl_unit = ttk.Label(self.input_frm, text='kg')   # ← 加这一行
-		self.lbl_unit.grid(row=1, column=4, padx=(0, 5))
+		ttk.Label(self.input_frm, text='体重').grid(row=1, column=2)
+		self.var_w = tk.DoubleVar(value=75.00) # 默认75
+		self.var_w.set(f"{to_show_unit(75, self.person['unit']):.2f}")
+		ttk.Entry(self.input_frm, textvariable=self.var_w, width=6).grid(row=1, column=3, padx=(5, 2))
+		self.lbl_unit = ttk.Label(self.input_frm) # ← 加这一行
+		self.lbl_unit.config(text=self.person['unit'] if self.person else 'kg')
+		self.lbl_unit.grid(row=1, column=5, padx=(0, 5))
 
 		# 备注
-		ttk.Label(self.input_frm, text='备注').grid(row=1, column=4)
+		ttk.Label(self.input_frm, text='备注').grid(row=1, column=6)
 		self.var_note = tk.StringVar()
-		ttk.Entry(self.input_frm, textvariable=self.var_note, width=12).grid(row=1, column=5, padx=(5, 10))
+		ttk.Entry(self.input_frm, textvariable=self.var_note, width=12).grid(row=1, column=7, padx=(5, 10))
 
-		ttk.Button(self.input_frm, text='确认添加', command=self.add_record).grid(row=1, column=6, padx=(5, 0))
+		ttk.Button(self.input_frm, text='确认添加', command=self.add_record).grid(row=1, column=8, padx=(5, 0))
 
-		self.input_frm.lower()  # 先放到最底层
+		self.input_frm.lower() # 先放到最底层
 		self.input_frm.grid(row=1, column=0, sticky='ew', padx=20, pady=5)
 		self.input_frm.grid_remove()
 
@@ -189,8 +329,8 @@ class App(tk.Tk):
 			btn.grid(row=0, column=i+1, padx=2)
 			self.time_btn[t] = btn
 
-		self.current_scope = self.cfg.setdefault('time_scope', '1月')  # 默认
-		self.switch_time_scope(self.current_scope)
+		self.scope = self.cfg.setdefault('time_scope', '1月') # 默认
+		self.switch_time_scope(self.scope)
 
 		# 鼠标悬停提示
 		self.anno = None
@@ -198,18 +338,18 @@ class App(tk.Tk):
 
 	def update_scope_buttons(self):
 		"""根据现有数据跨度，决定哪些时间维度可见"""
-		if not self.person:  # 没人就全隐藏
+		if not self.person: # 没人就全隐藏
 			scopes = []
 		else:
-			rows = fetch_rec(self.person['name'])
-			if not rows:  # 只有“全部”
+			rows = fetch_records(self.person['name'])
+			if not rows: # 只有“全部”
 				scopes = ['全部']
 			else:
 				# 最早-最晚 相差天数
-				times = [datetime.datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S') for r in rows]
+				times = [datetime.datetime.strptime(r[0], '%Y.%m.%d %H:%M:%S') for r in rows]
 				span_days = (max(times) - min(times)).days
 				scopes = ['全部']
-				if span_days >= 0:  # 任何数据都有“全部”
+				if span_days >= 0: # 任何数据都有“全部”
 					scopes.append('1月')
 				if span_days >= 30:
 					scopes.append('3月')
@@ -254,7 +394,7 @@ class App(tk.Tk):
 
 	def switch_time_scope(self, scope):
 		"""根据时间维度过滤并重绘"""
-		self.current_scope = scope
+		self.scope = scope
 		self.cfg['time_scope'] = scope
 		save_cfg(self.cfg)
 
@@ -272,7 +412,7 @@ class App(tk.Tk):
 		if not self.person:
 			self.show_placeholder()
 			return
-		rows = fetch_rec(self.person['name'])
+		rows = fetch_records(self.person['name'])
 		if not rows:
 			self.show_placeholder()
 			return
@@ -280,40 +420,45 @@ class App(tk.Tk):
 		# 时间过滤
 		now = datetime.datetime.now()
 		delta_map = {'1月': 1, '3月': 3, '半年': 6, '1年': 12, '3年': 12*3, '5年': 12*5, '全部': 0}
-		months = delta_map[self.current_scope]
+		months = delta_map[self.scope]
 		cutoff = subtract_months(now, months=months)
 		if months != 0:
-			rows = [r for r in rows if datetime.datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S') >= cutoff]
+			rows = [r for r in rows if datetime.datetime.strptime(r[0], '%Y.%m.%d %H:%M:%S') >= cutoff]
 
 		if not rows:
 			self.show_placeholder()
 			return
 
-		times = [datetime.datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S') for r in rows]
-		weights = [r[1] for r in rows]
+		times = [datetime.datetime.strptime(r[0], '%Y.%m.%d %H:%M:%S') for r in rows]
+		weights = [to_show_unit(r[1], self.person['unit']) for r in rows]
 		bmis = [r[3] for r in rows]
 		notes = [r[2] for r in rows]
 
-		# --------- Y 轴动态整十 ---------
-		y_min, y_max = min(weights), max(weights)
-		y_low  = math.floor(y_min / 10) * 10
-		y_high = math.ceil(y_max / 10) * 10
-		self.ax.set_ylim(y_low, y_high)
-		self.ax.set_ylabel('体重(kg)')
-		self.ax.set_yticks(range(y_low, y_high + 1, 10))
-
 		# --------- X 轴仅三个刻度 ---------
-		if months != 0:  # 不为全部
+		if months != 0: # 不为全部
 			start = cutoff
-		else:  # 为全部
+		else: # 为全部
 			start = times[0]
 		end = now
 		mid = start + (end - start) / 2
+		print(f"start: {start.date()} end: {end.date()}")
 
 		self.ax.set_xlim(start, end)
 		self.ax.set_xticks([start, mid, end])
-		self.ax.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
+		self.ax.xaxis.set_major_formatter(DateFormatter('%Y.%m.%d'))
 		self.ax.set_xlabel('')
+
+		# --------- Y 轴动态整十 ---------
+		y_min, y_max = min(weights), max(weights)
+		print(f"{y_min=}{self.person['unit']} {y_max=}{self.person['unit']}")
+		y_low = math.floor(y_min / 5) * 5
+		y_high = math.ceil(y_max / 5) * 5
+		print(f"{y_low=}{self.person['unit']} {y_high=}{self.person['unit']}")
+		self.ax.set_ylim(y_low, y_high)
+		self.ax.set_yticks(range(y_low, y_high + 1, 5))
+		self.ax.set_ylabel(f'体重({self.person["unit"]})')
+		# y_show = [to_show_unit(w, self.person['unit']) for w in weights]
+		# self.ax.set_yticks([to_show_unit(v, self.person['unit']) for v in range(y_low, y_high+1, 10)])
 
 		# 只留坐标轴
 		self.ax.spines['top'].set_visible(False)
@@ -340,7 +485,7 @@ class App(tk.Tk):
 			self.input_frm.grid()
 			self.btn_toggle.config(text='收起输入')
 			# 刷新时间为“年-月-日 时:分:秒”
-			self.var_time.set(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+			self.var_time.set(datetime.datetime.now().strftime('%Y.%m.%d %H:%M:%S'))
 		else:
 			self.input_frm.grid_remove()
 			self.btn_toggle.config(text='添加数据')
@@ -358,103 +503,38 @@ class App(tk.Tk):
 			return
 
 		# 找最近点
-		idx = min(range(len(self.hover_time)),key=lambda i: abs(date2num(self.hover_time[i]) - x))
+		idx = min(range(len(self.hover_time)), key=lambda i: abs(date2num(self.hover_time[i]) - x))
 		d, w, b, n = self.hover_time[idx], self.hover_weight[idx], self.hover_bmi[idx], self.hover_note[idx]
-		if n:
-			txt = f"{d.strftime('%Y.%m.%d')}\n{w:.2f} kg\nBMI {b:.1f} {bmi_level(b, self.person['sex'])}\n{n}"
+		# print(f"{d=} {w=} {b=} {n=}")
+		if n: # 有备注
+			# txt = f"{d.strftime('%Y.%m.%d')}\n{w:.2f} kg\nBMI {b:.1f} {bmi_level(b, self.person['sex'])}\n{n}"
+			txt = f"{d.strftime('%Y.%m.%d')}\n{d.strftime('%H:%M:%S')}\n{w:.2f} {self.person['unit']}\n{b} {bmi_level(b, self.person['sex'])}\n{n}"
 		else:
-			txt = f"{d.strftime('%Y.%m.%d')}\n{w:.2f} kg\nBMI {b:.1f} {bmi_level(b, self.person['sex'])}"
+			# txt = f"{d.strftime('%Y.%m.%d')}\n{w:.2f} kg\nBMI {b:.1f} {bmi_level(b, self.person['sex'])}"
+			txt = f"{d.strftime('%Y.%m.%d')}\n{d.strftime('%H:%M:%S')}\n{w:.2f} {self.person['unit']}\n{b} {bmi_level(b, self.person['sex'])}"
 		
 		# 计算提示框坐标
 		x, y = date2num(d), w
 		ax = self.ax
 
 		# 把提示放在点右边，如超出右边界就改放左边
-		if x > ax.get_xlim()[1] * 0.9:        # 距离右边界 10% 以内
-			xytext = (-40, 10)                  # 向左偏移
+		if x > ax.get_xlim()[1] * 0.9: # 距离右边界 10% 以内
+			xytext = (-40, 10) # 向左偏移
 		else:
-			xytext = (10, 10)                   # 默认向右
+			xytext = (10, 10) # 默认向右
 		
 		if self.anno:
 			self.anno.set_text(txt)
 			self.anno.xy = (date2num(d), w)
+			self.anno.ha ='center'
+			self.anno.va='center', 
 		else:
 			self.anno = self.ax.annotate(
 				txt, xy=(date2num(d), w),
+				ha='center', va='center', 
 				xytext=xytext, textcoords='offset points',
 				bbox=dict(boxstyle='round', alpha=0.7, facecolor='lightyellow'))
 		self.canvas.draw_idle()
-
-	# ---------------- 向导 ----------------
-	def wizard_if_need(self):
-		# 阻塞向导直到有人物
-		while not self.cfg['persons']:
-			self.wizard()
-			self.cfg = load_cfg()
-
-		# 现在一定有人物
-		self.refresh_persons()
-
-	def wizard(self, edit=None):
-		top = tk.Toplevel(self)
-		top.title('添加人物' if edit is None else '修改人物')
-		center(top)
-		
-		# 默认值
-		defaults = edit or dict(name='默认', height=175, unit='kg', sex='男', source='日常')
-
-		fields = {}
-		labels = ['姓名', '身高(cm)', '性别', '单位', '数据源']
-		keys   = ['name', 'height', 'sex', 'unit', 'source']
-		widgets = []
-
-		for i, (lab, key) in enumerate(zip(labels, keys)):
-			ttk.Label(top, text=lab).grid(row=i, column=0, sticky='w', padx=5, pady=3)
-			if key == 'sex':
-				cb = ttk.Combobox(top, state='readonly', values=['男', '女'], width=17)
-				cb.set(defaults[key])
-				cb.grid(row=i, column=1, padx=5)
-				widgets.append(cb)
-			elif key == 'unit':
-				cb = ttk.Combobox(top, state='readonly', values=['kg', 'lb', '公斤', '斤'], width=17)
-				cb.set(defaults[key])
-				cb.grid(row=i, column=1, padx=5)
-				widgets.append(cb)
-			else:
-				ent = ttk.Entry(top, width=20)
-				ent.insert(0, str(defaults[key]))
-				ent.grid(row=i, column=1, padx=5)
-				widgets.append(ent)
-			fields[key] = widgets[-1]
-
-		def save():
-			name = fields['name'].get().strip()
-			if not name:
-				messagebox.showerror('错误', '姓名不能为空')
-				return
-			
-			person = {
-				'name': name,
-				'height': float(fields['height'].get()),
-				'sex': fields['sex'].get(),
-				'unit': fields['unit'].get(),
-				'source': fields['source'].get()
-			}
-
-			# 去重
-			self.cfg = load_cfg()
-			if edit is None:  # 新增用户
-				self.cfg['persons'].append(person)
-			else:  # 编辑用户
-				idx = next(i for i, p in enumerate(self.cfg['persons']) if p['name'] == edit['name'])
-				self.cfg['persons'][idx] = person
-			save_cfg(self.cfg)
-			self.cfg = load_cfg()   # 立刻重新读文件
-			top.destroy()
-
-		ttk.Button(top, text='保存', command=save).grid(row=len(labels), columnspan=2, pady=8)
-		top.transient(self)   # 保持主窗可见
-		self.wait_window(top)
 
 	# ---------------- 人物编辑窗口 ----------------
 	def edit_person_win(self):
@@ -469,7 +549,6 @@ class App(tk.Tk):
 			tree.heading(c, text=c)
 			tree.column(c, width=80, anchor='center')
 		tree.pack(padx=10, pady=5)
-		
 
 		def refresh():
 			for item in tree.get_children():
@@ -493,6 +572,7 @@ class App(tk.Tk):
 		person = dict(name=vals[0], height=float(vals[1]), sex=vals[2], unit=vals[3], source=vals[4])
 		self.wizard(edit=person)
 		refresh()
+		self.refresh()
 
 	def delete_selected(self, tree, refresh):
 		sel = tree.selection()
@@ -504,42 +584,6 @@ class App(tk.Tk):
 		refresh()
 		self.refresh_persons()
 
-	# ---------------- 逻辑 ----------------
-	def refresh_persons(self):
-		self.cfg = load_cfg()
-		names = [p['name'] for p in self.cfg['persons']]
-		self.cb_person.config(values=names)
-		if names:
-			self.cb_person.current(0)
-			self.switch_person()
-		else:
-			self.person = None
-			self.show_placeholder()
-
-	def switch_person(self, *_):
-		name = self.cb_person.get()
-		self.person = next((p for p in self.cfg['persons'] if p['name'] == name), None)
-		if self.person:
-			self.lbl_unit.config(text=self.person['unit'])
-			self.update_scope_buttons()
-
-	def refresh(self):
-		"""重新读取配置+数据库并重绘界面"""
-		self.cfg = load_cfg()          # 重新读配置
-		self.refresh_persons()         # 刷新人物下拉框
-		self.update_scope_buttons()    # 刷新时间维度按钮
-		self.draw_chart()              # 重绘折线图
-
-	# ---------------- 单位换算 ----------------
-	UNIT2KG = {'kg': 1, '公斤': 1, '斤': 0.5, 'lb': 0.453592}
-	KG2UNIT = {k: 1/v for k, v in UNIT2KG.items()}
-
-	def to_kg(self, val):
-		return val * self.UNIT2KG[self.person['unit']]
-
-	def to_show_unit(self, kg):
-		return round(kg * self.KG2UNIT[self.person['unit']], 2)
-
 	# ---------------- 添加记录 ----------------
 	def add_record(self):
 		if not self.person:
@@ -547,13 +591,13 @@ class App(tk.Tk):
 			return
 		try:
 			w_show = round(self.var_w.get(), 2)
-			w_kg = self.to_kg(w_show)
+			w_kg = to_kg(w_show, self.person['unit'])
 			bmi = calc_bmi(w_kg, self.person['height'])
-			insert_rec(self.person['name'], self.var_time.get(), w_kg, self.var_note.get(), bmi)
+			insert_record(self.person['name'], self.var_time.get(), w_kg, self.var_note.get(), bmi)
 			
 			# self.draw_chart()
 			self.update_scope_buttons()
-			time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+			time = datetime.datetime.now().strftime('%Y.%m.%d %H:%M:%S')
 			self.var_time.set(time)
 		except Exception as e:
 			messagebox.showerror("错误", str(e))
