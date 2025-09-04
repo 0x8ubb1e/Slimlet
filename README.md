@@ -45,3 +45,11 @@ python main.py
 - React Native (iOS / Android)  
 - python + SQLite 本地存储  
 - matplotlib 轻量曲线
+
+
+打包命令：
+
+```bash
+pyinstaller -F -w -n Slimlet --icon=slimlet.ico --add-data "slim.db;." --add-data "config.json;." --clean main.py
+pyinstaller --onefile --upx-dir "C:\upx-4.1.0-win64" main.py
+```
