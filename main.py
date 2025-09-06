@@ -40,17 +40,20 @@ def center(win):
 # 划时间区间 当前时间 - 时间维度
 def subtract_months(date, months):
 	if months == 0:
-		return
-	
-	month = date.month - months
-	print(f"date: {date.date()} months: {months} month: {month}")
-	year = date.year
-	while month <= 0:
-		month += 12
-		year -= 1
-	# print(f"start: {date.replace(year=year, month=month, day=1).date()} end: {date.date()}")
-	# print(f"{date.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)}")
-	return date.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+		return date.replace(year=1900, month=1, day=1)  # 全部：远早起点
+	elif months < 1:
+		days = int(months * 30.44)  # 平均每月天数
+		return date - datetime.timedelta(days=days)
+	else:
+		month = date.month - months
+		print(f"date: {date.date()} {months=} {month=}")
+		year = date.year
+		while month <= 0:
+			month += 12
+			year -= 1
+		# print(f"start: {date.replace(year=year, month=month, day=1).date()} end: {date.date()}")
+		# print(f"{date.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)}")
+		return date.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
 
 # ---------------- 数据层 ----------------
 def load_cfg():
@@ -103,6 +106,7 @@ def calc_bmi(weight: float, height: float) -> float:
 	"""计算 BMI，保留 2 位小数"""
 	if height <= 0:
 		return 0.0
+	print(f"{weight=} {height=} {round(weight / ((height / 100) ** 2), 2)=}")
 	return round(weight / ((height / 100) ** 2), 2)
 
 # ---------------- 单位换算 ----------------
@@ -322,7 +326,7 @@ class App(tk.Tk):
 		self.time_bar = ttk.Frame(self)
 		self.time_bar.grid(row=3, column=0, sticky='ew', padx=10, pady=2)
 
-		self.time_vars = ['1月', '3月', '半年', '1年', '3年', '5年', '全部']
+		self.time_vars = ['7天', '15天', '1月', '3月', '半年', '1年', '3年', '5年', '全部']
 		for i in range(len(self.time_vars) + 2):
 			self.time_bar.grid_columnconfigure(i, weight=1)
 
@@ -332,7 +336,7 @@ class App(tk.Tk):
 			btn.grid(row=0, column=i+1, padx=2)
 			self.time_btn[t] = btn
 
-		self.scope = self.cfg.setdefault('time_scope', '1月') # 默认
+		self.scope = self.cfg.setdefault('time_scope', '7天') # 默认
 		self.switch_time_scope(self.scope)
 
 		# 鼠标悬停提示
@@ -353,6 +357,10 @@ class App(tk.Tk):
 				span_days = (max(times) - min(times)).days
 				scopes = ['全部']
 				if span_days >= 0: # 任何数据都有“全部”
+					scopes.append('7天')
+				if span_days >= 7:
+					scopes.append('15天')
+				if span_days >= 15:
 					scopes.append('1月')
 				if span_days >= 30:
 					scopes.append('3月')
@@ -422,7 +430,7 @@ class App(tk.Tk):
 		
 		# 时间过滤
 		now = datetime.datetime.now()
-		delta_map = {'1月': 1, '3月': 3, '半年': 6, '1年': 12, '3年': 12*3, '5年': 12*5, '全部': 0}
+		delta_map = {'7天': 0.25, '15天': 0.5, '1月': 1, '3月': 3, '半年': 6, '1年': 12, '3年': 12*3, '5年': 12*5, '全部': 0}
 		months = delta_map[self.scope]
 		cutoff = subtract_months(now, months=months)
 		if months != 0:
@@ -449,6 +457,9 @@ class App(tk.Tk):
 		self.ax.set_xlim(start, end)
 		self.ax.set_xticks([start, mid, end])
 		self.ax.xaxis.set_major_formatter(DateFormatter('%Y.%m.%d'))
+		xlim = self.ax.get_xlim()
+		pad = (xlim[1] - xlim[0]) * 0.05
+		self.ax.set_xlim(xlim[0], xlim[1] + pad)
 		self.ax.set_xlabel('')
 
 		# --------- Y 轴动态整十 ---------
